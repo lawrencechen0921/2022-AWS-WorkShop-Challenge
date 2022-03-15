@@ -1,0 +1,782 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: CloudFront Workshop - API gateway, S3, and Elemental Media Package origin with sample web site.
+
+Parameters:
+  ResourceBucket:
+    Type: String
+    Default: 'ee-assets-prod-us-east-1'
+    Description: 'Name of S3 bucket that contains custom resources'
+
+Outputs:
+  originBucket:
+    Value: !Ref OriginBucket
+    Description: 'S3 bucket which contains static website origin'
+  logBucket:
+    Value: !Ref LogBucket
+    Description: 'S3 bucket for storing logs'
+  failoverBucket:
+    Value: !Ref FailoverBucket
+    Description: 'failover contents bucket'
+  videoOriginDomain:
+    Value: !GetAtt MediaPackageGroup.DomainName
+    Description: 'Media Package URL'
+  apiOriginEndPoint:
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/api/'
+    Description: 'API endpoint'
+  s3WebsiteDomain:
+    Value: !GetAtt OriginBucket.WebsiteURL
+    Description: 'Static website URL served from S3'
+  mediaPackageSecretAccessRole:
+    Value: !GetAtt MediaPackageSecretReadRole.Arn
+    Description: Role arn for Media Package to read secret from Secrets Manager
+
+Resources:
+  # S3 buckets
+  OriginBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+    DeletionPolicy: Delete
+  VideoBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties: {}
+    DeletionPolicy: Delete
+  LogBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties: {}
+    DeletionPolicy: Delete
+  FailoverBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties: {}
+    DeletionPolicy: Delete
+  # S3 bucket policies
+  OriginBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref OriginBucket
+      PolicyDocument:
+        Statement:
+          - Action:
+              - 's3:GetObject'
+            Effect: Allow
+            Resource: !Join 
+              - ''
+              - - !GetAtt OriginBucket.Arn
+                - '/*'
+            Principal: '*'
+  # Media Packages (role, group, config, asset)
+  MediaPackageRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal: 
+              Service: 'mediapackage.amazonaws.com'
+        Version: '2012-10-17'
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action: 's3:GetObject'
+                Effect: 'Allow'
+                Resource: 'arn:aws:s3:::*/*'
+                Sid: '0'
+              - Action:
+                - 's3:GetBucketRequestPayment'
+                - 's3:ListBucket'
+                - 's3:GetBucketLocation'
+                Effect: 'Allow'
+                Resource: 'arn:aws:s3:::*'
+                Sid: '1'
+            Version: '2012-10-17'
+          PolicyName: 's3-access'
+  MediaPackageSecretReadRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal: 
+              Service: 'mediapackage.amazonaws.com'
+        Version: '2012-10-17'
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                - 'secretsmanager:GetSecretValue'
+                - 'secretsmanager:DescribeSecret'
+                - 'secretsmanager:ListSecrets'
+                - 'secretsmanager:ListSecretVersionIds'
+                Effect: 'Allow'
+                Resource: '*'
+                Sid: '0'
+              - Action: ['iam:GetRole', 'iam:PassRole']
+                Effect: 'Allow'
+                Resource: '*'
+                Sid: '1'
+            Version: '2012-10-17'
+          PolicyName: 'secretmanager-access'
+  MediaPackageGroup:
+    Type: 'AWS::MediaPackage::PackagingGroup'
+    Properties:
+      Id: !Sub '${AWS::StackName}-packaginggroup'
+  MediaPackageConfig:
+    Type: 'AWS::MediaPackage::PackagingConfiguration'
+    Properties:
+      HlsPackage:
+        HlsManifests:
+          - ManifestName: 'index'
+        SegmentDurationSeconds: 3
+      Id: !Sub '${AWS::StackName}-packagingconfiguration'
+      PackagingGroupId: !Sub '${AWS::StackName}-packaginggroup'
+    DependsOn: MediaPackageGroup 
+  MediaPackageAsset:
+    Type: 'AWS::MediaPackage::Asset'
+    Properties:
+      Id: !Sub '${AWS::StackName}-asset'
+      PackagingGroupId: !Sub '${AWS::StackName}-packaginggroup'
+      SourceArn: 
+        !Join
+          - ''
+          - - !GetAtt VideoBucket.Arn
+            - '/sample.smil'
+      SourceRoleArn: !GetAtt MediaPackageRole.Arn
+    DependsOn: 
+      - MediaPackageRole
+      - MediaPackageConfig
+      - VideoBucketDeploy
+  # lambda functions and roles
+  LambdaRoleEcho:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+  LambdaRoleLogin:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+  LambdaRoleLogout:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+  LambdaRoleSessionvalue:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+  LambdaRoleGetplayurl:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-GetplayurlInlinePolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action: ['mediapackage-vod:List*']
+                Effect: 'Allow'
+                Resource: !Sub 'arn:${AWS::Partition}:mediapackage-vod:${AWS::Region}:${AWS::AccountId}:*'
+              - Action: ['mediapackage-vod:Describe*']
+                Effect: 'Allow'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:mediapackage-vod:${AWS::Region}:${AWS::AccountId}:assets/*'
+                  - !Sub 'arn:${AWS::Partition}:mediapackage-vod:${AWS::Region}:${AWS::AccountId}:packaging-configurations/*'
+                  - !Sub 'arn:${AWS::Partition}:mediapackage-vod:${AWS::Region}:${AWS::AccountId}:packaging-groups/*'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+  LambdaRoleGetsignedcookie:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+  LambdaRoleFle:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+  LambdaRoleTestStaleObject:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'  
+  FunctionEcho:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code: 
+        S3Bucket: !Ref ResourceBucket
+        S3Key: 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/function/echo.zip'
+      Role: !GetAtt LambdaRoleEcho.Arn
+      Description: 'returns incoming request object'
+      Handler: 'index.handler'
+      Runtime: 'nodejs14.x'
+    DependsOn:
+      - LambdaRoleEcho
+  FunctionLogin:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref ResourceBucket
+        S3Key: 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/function/login.zip'
+      Role: !GetAtt LambdaRoleLogin.Arn
+      Environment:
+        Variables:
+          cookieName: 'cloudfront-workshopSessionId'
+          userName: 'admin'
+          password: 'testadmin'
+      Description: 'emulates login function'
+      Handler: 'index.handler'
+      Runtime: 'nodejs14.x'
+    DependsOn:
+      - LambdaRoleLogin
+  FunctionLogout:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref ResourceBucket
+        S3Key: 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/function/logout.zip'
+      Role: !GetAtt LambdaRoleLogout.Arn
+      Description: 'emluates logout (remove cookie)'
+      Handler: 'index.handler'
+      Runtime: 'nodejs14.x'
+    DependsOn:
+      - LambdaRoleLogout
+  FunctionSessionvalue:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref ResourceBucket
+        S3Key: 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/function/sessionvalue.zip'
+      Role: !GetAtt LambdaRoleSessionvalue.Arn
+      Environment:
+        Variables:
+          cookieName: 'cloudfront-workshopSessionId'
+      Description: 'return session ID or anonymous session'
+      Handler: 'index.handler'
+      Runtime: 'nodejs14.x'
+    DependsOn:
+      - LambdaRoleSessionvalue
+    UpdateReplacePolicy: 'Delete'
+    DeletionPolicy: 'Delete'
+  FunctionGetplayurl:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref ResourceBucket
+        S3Key: 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/function/getplayurl.zip'
+      Role: !GetAtt LambdaRoleGetplayurl.Arn
+      Environment:
+        Variables:
+          assetId: !Sub '${AWS::StackName}-asset'
+      Description: 'read the play url of mediapackage VOD'
+      Handler: 'index.handler'
+      Runtime: 'nodejs14.x'
+      Timeout: 60
+    DependsOn:
+      - LambdaRoleGetplayurl
+    UpdateReplacePolicy: 'Delete'
+    DeletionPolicy: 'Delete'
+  FunctionGetsignedcookie:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref ResourceBucket
+        S3Key: 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/function/getsignedcookie.zip'
+      Role: !GetAtt LambdaRoleGetsignedcookie.Arn
+      Environment:
+        Variables:
+          cloudFrontKeypairId: '<put your keypair id>'
+          cloudFrontPrivateKey: '<put your private key text>'
+          sessionDuration: '86400'
+          websiteDomain: '<put your cloudfront domain name>'
+      Description: 'sets cookie for cloudfront private content'
+      Handler: 'index.handler'
+      Runtime: 'nodejs14.x'
+    DependsOn:
+      - LambdaRoleGetsignedcookie
+    UpdateReplacePolicy: 'Delete'
+    DeletionPolicy: 'Delete'
+  FunctionFle:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref ResourceBucket
+        S3Key: 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/function/fle.zip'
+      Role: !GetAtt LambdaRoleFle.Arn
+      Description: 'shows incoming POST body as it is'
+      Handler: 'index.handler'
+      Runtime: 'nodejs14.x'
+    DependsOn:
+      - LambdaRoleFle
+    UpdateReplacePolicy: 'Delete'
+    DeletionPolicy: 'Delete'
+  FunctionTestStaleObject:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref ResourceBucket
+        S3Key: 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/function/teststaleobject.zip'
+      Role: !GetAtt LambdaRoleTestStaleObject.Arn
+      Environment:
+        Variables:
+          statusCode: '200'
+      Description: 'returns 200 OK or 5xx error based on the env variable'
+      Handler: 'index.handler'
+      Runtime: 'nodejs14.x'
+    DependsOn:
+      - LambdaRoleTestStaleObject
+  # API gateway
+  ApiGateway:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Description: 'API endpoint for function calls'
+      Name: !Sub '${AWS::StackName}-OriginAPI'
+      EndpointConfiguration:
+        Types: ['REGIONAL']
+  ApiDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Ref ApiGateway
+    DependsOn:
+      - ApiGateway
+      - ApiMethodEchoGET
+      - ApiMethodLoginPOST
+      - ApiMethodLogoutGET
+      - ApiMethodSessionvalueGET
+      - ApiMethodGetplayurlGET
+    UpdateReplacePolicy: 'Delete'
+    DeletionPolicy: 'Delete'
+  ApiDeploymentStageApi:
+    Type: 'AWS::ApiGateway::Stage'
+    Properties:
+      RestApiId: !Ref ApiGateway
+      DeploymentId: !Ref ApiDeployment
+      StageName: 'api'
+  #API resource and method
+  ApiResourceEcho:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: 'echo'
+      RestApiId: !Ref ApiGateway
+  ApiMethodEchoGET:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: 'GET'
+      ResourceId: !Ref ApiResourceEcho
+      RestApiId: !Ref ApiGateway
+      AuthorizationType: 'NONE'
+      Integration:
+        IntegrationHttpMethod: 'POST'
+        Type: 'AWS_PROXY'
+        Uri: !Join
+          - ''
+          - - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/'
+            - !GetAtt FunctionEcho.Arn
+            - '/invocations'
+  ApiResourceLogin:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: 'login'
+      RestApiId: !Ref ApiGateway
+  ApiMethodLoginPOST:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: 'POST'
+      ResourceId: !Ref ApiResourceLogin
+      RestApiId: !Ref ApiGateway
+      AuthorizationType: 'NONE'
+      Integration:
+        IntegrationHttpMethod: 'POST'
+        Type: 'AWS_PROXY'
+        Uri: !Join
+          - ''
+          - - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/'
+            - !GetAtt FunctionLogin.Arn
+            - '/invocations'
+  ApiResourceLogout:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: 'logout'
+      RestApiId: !Ref ApiGateway
+  ApiMethodLogoutGET:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: 'GET'
+      ResourceId: !Ref ApiResourceLogout
+      RestApiId: !Ref ApiGateway
+      AuthorizationType: 'NONE'
+      Integration:
+        IntegrationHttpMethod: 'POST'
+        Type: 'AWS_PROXY'
+        Uri: !Join
+          - ''
+          - - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/'
+            - !GetAtt FunctionLogout.Arn
+            - '/invocations'
+  ApiResourceSessionvalue:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: 'sessionvalue'
+      RestApiId: !Ref ApiGateway
+  ApiMethodSessionvalueGET:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: 'GET'
+      ResourceId: !Ref ApiResourceSessionvalue
+      RestApiId: !Ref ApiGateway
+      AuthorizationType: 'NONE'
+      Integration:
+        IntegrationHttpMethod: 'POST'
+        Type: 'AWS_PROXY'
+        Uri: !Join
+          - ''
+          - - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/'
+            - !GetAtt FunctionSessionvalue.Arn
+            - '/invocations'
+  ApiResourceGetplayurl:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: 'getplayurl'
+      RestApiId: !Ref ApiGateway
+  ApiMethodGetplayurlGET:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: 'GET'
+      ResourceId: !Ref ApiResourceGetplayurl
+      RestApiId: !Ref ApiGateway
+      AuthorizationType: 'NONE'
+      Integration:
+        IntegrationHttpMethod: 'POST'
+        Type: 'AWS_PROXY'
+        Uri: !Join
+          - ''
+          - - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/'
+            - !GetAtt FunctionGetplayurl.Arn
+            - '/invocations'
+  ApiResourceGetsignedcookie:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: 'getsignedcookie'
+      RestApiId: !Ref ApiGateway
+  ApiMethodGetsignedcookieGET:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: 'GET'
+      ResourceId: !Ref ApiResourceGetsignedcookie
+      RestApiId: !Ref ApiGateway
+      AuthorizationType: 'NONE'
+      Integration:
+        IntegrationHttpMethod: 'POST'
+        Type: 'AWS_PROXY'
+        Uri: !Join
+          - ''
+          - - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/'
+            - !GetAtt FunctionGetsignedcookie.Arn
+            - '/invocations'
+  ApiResourceFle:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: 'fle'
+      RestApiId: !Ref ApiGateway
+  ApiMethodFlePOST:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: 'POST'
+      ResourceId: !Ref ApiResourceFle
+      RestApiId: !Ref ApiGateway
+      AuthorizationType: 'NONE'
+      Integration:
+        IntegrationHttpMethod: 'POST'
+        Type: 'AWS_PROXY'
+        Uri: !Join
+          - ''
+          - - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/'
+            - !GetAtt FunctionFle.Arn
+            - '/invocations'
+  ApiResourceTeststaleobject:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: 'teststaleobject'
+      RestApiId: !Ref ApiGateway
+  ApiMethodTeststaleobjectGET:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: 'GET'
+      ResourceId: !Ref ApiResourceTeststaleobject
+      RestApiId: !Ref ApiGateway
+      AuthorizationType: 'NONE'
+      Integration:
+        IntegrationHttpMethod: 'POST'
+        Type: 'AWS_PROXY'
+        Uri: !Join
+          - ''
+          - - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/'
+            - !GetAtt FunctionTestStaleObject.Arn
+            - '/invocations'
+  # Lambda Permission for API
+  EchoApiPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt FunctionEcho.Arn
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/echo'
+  LoginApiPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt FunctionLogin.Arn
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/login'
+  LogoutApiPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt FunctionLogout.Arn
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/logout'
+  SessionvalueApiPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt FunctionSessionvalue.Arn
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/sessionvalue'
+  GetplayurlApiPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt FunctionGetplayurl.Arn
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/getplayurl'
+  GetsignedcookieApiPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt FunctionGetsignedcookie.Arn
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/getsignedcookie'
+  FleApiPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt FunctionFle.Arn
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/POST/fle'
+  TeststaleobjectApiPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt FunctionTestStaleObject.Arn
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/teststaleobject'
+  # Custom resource IAM role
+  S3BucketCustomResourceLambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-CustomResourceInlinePolicy'
+          PolicyDocument:
+            Statement:
+              - Action: ['s3:GetObject*', 's3:GetBucket*', 's3:List*']
+                Effect: 'Allow'
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ResourceBucket}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ResourceBucket}/*'
+              - Action: ['s3:GetObject*', 's3:GetBucket*', 's3:List*', 's3:DeleteObject*', 's3:PutObject*', 's3:Abort*']
+                Effect: 'Allow'
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:s3:::${OriginBucket}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${VideoBucket}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${FailoverBucket}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${LogBucket}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${OriginBucket}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${VideoBucket}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${FailoverBucket}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${LogBucket}/*'
+  # Custom resource S3 auto delete
+  S3BucketAutoDeleteFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref ResourceBucket
+        S3Key: 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/autodeletefunction.zip'
+      Timeout: 900
+      MemorySize: 128
+      Handler: '__entrypoint__.handler'
+      Runtime: 'nodejs14.x'
+      Role: !GetAtt S3BucketCustomResourceLambdaExecutionRole.Arn
+    DependsOn:
+      - S3BucketCustomResourceLambdaExecutionRole
+  OriginBucketAutoDelete:
+    Type: 'Custom::S3AutoDeleteObjects'
+    Properties:
+      ServiceToken:
+        !GetAtt S3BucketAutoDeleteFunction.Arn
+      BucketName: !Ref OriginBucket
+    DependsOn: OriginBucket
+    UpdateReplacePolicy: 'Delete'
+    DeletionPolicy: 'Delete'
+  VideoBucketAutoDelete:
+    Type: 'Custom::S3AutoDeleteObjects'
+    Properties:
+      ServiceToken:
+        !GetAtt S3BucketAutoDeleteFunction.Arn
+      BucketName: !Ref VideoBucket
+    DependsOn: VideoBucket
+    UpdateReplacePolicy: 'Delete'
+    DeletionPolicy: 'Delete'
+  LogBucketAutoDelete:
+    Type: 'Custom::S3AutoDeleteObjects'
+    Properties:
+      ServiceToken:
+        !GetAtt S3BucketAutoDeleteFunction.Arn
+      BucketName: !Ref LogBucket
+    DependsOn: LogBucket
+    UpdateReplacePolicy: 'Delete'
+    DeletionPolicy: 'Delete'
+  FailoverBucketAutoDelete:
+    Type: 'Custom::S3AutoDeleteObjects'
+    Properties:
+      ServiceToken:
+        !GetAtt S3BucketAutoDeleteFunction.Arn
+      BucketName: !Ref FailoverBucket
+    DependsOn: FailoverBucket
+    UpdateReplacePolicy: 'Delete'
+    DeletionPolicy: 'Delete'
+  # Custom resource to Deploy files to S3
+  S3BucketDeployFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref ResourceBucket
+        S3Key: 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/filedeployfunction.zip'
+      Timeout: 900
+      MemorySize: 256
+      Handler: 'index.handler'
+      Runtime: 'python3.7'
+      Role: !GetAtt S3BucketCustomResourceLambdaExecutionRole.Arn
+      Layers:
+        - !Ref S3BucketDeployAWSCLILayer
+    DependsOn:
+      - S3BucketCustomResourceLambdaExecutionRole
+  S3BucketDeployAWSCLILayer:
+    Type: 'AWS::Lambda::LayerVersion'
+    Properties:
+      Content:
+        S3Bucket: !Ref ResourceBucket
+        S3Key: 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/awsclilayer.zip'
+      Description: 'This layer is used in S3 Bucket Deploy Function'
+  OriginBucketDeploy:
+    Type: 'Custom::S3BucketDeployment'
+    Properties:
+      ServiceToken: !GetAtt S3BucketDeployFunction.Arn
+      SourceBucketNames:
+        - !Ref ResourceBucket
+      SourceObjectKeys:
+        - 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/demosite.zip'
+      DestinationBucketName: !Ref OriginBucket
+      Prune: true
+    UpdateReplacePolicy: 'Delete'
+    DeletionPolicy: 'Delete'
+  VideoBucketDeploy:
+    Type: 'Custom::S3BucketDeployment'
+    Properties:
+      ServiceToken: !GetAtt S3BucketDeployFunction.Arn
+      SourceBucketNames:
+        - !Ref ResourceBucket
+      SourceObjectKeys:
+        - 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/demovideo.zip'
+      DestinationBucketName: !Ref VideoBucket
+      Prune: true
+    UpdateReplacePolicy: 'Delete'
+    DeletionPolicy: 'Delete'
+  FailoverBucketDeploy:
+    Type: 'Custom::S3BucketDeployment'
+    Properties:
+      ServiceToken: !GetAtt S3BucketDeployFunction.Arn
+      SourceBucketNames:
+        - !Ref ResourceBucket
+      SourceObjectKeys:
+        - 'modules/768d4661f2bd45a8ae99044771b9b32c/v1/demosite.zip'
+      DestinationBucketName: !Ref FailoverBucket
+      Prune: true
+    UpdateReplacePolicy: 'Delete'
+    DeletionPolicy: 'Delete'
