@@ -124,10 +124,37 @@ However, sometimes the origin requires those values to provide correct response.
 CloudFront stores the objects in the cache with cache-key. By default, request URI is used as a cache-key. So whenever CloudFront receives a subsequent request, it looks the cache storage up with the request URI and find matching one.
 However, sometimes the response of a same URI can vary based on request query string, cookies, or headers. You can configure cache key to cache those varying responses in CloudFront separately.
 
-
-
-
 ## Improve performance with CloudFront
+
+### Static Content
+For static content, CloudFront can cache based on hundreds of POPs. Content cached in CloudFront can be delivered with lower latency from the POP closest to viewers without communication with the origin.
+
+### Performance Comparison between origin and CloudFront
+
+Check the average total-download-time of [s3WebsiteDomain] using the command below.
+
+```bash
+for i in `seq 1 10`; do echo $i; curl -s -o /dev/null --write-out "size_download: %{size_download} // time_total: %{time_total} // time_starttransfer: %{time_starttransfer}\n" http://[s3WebsiteDomain]/test/download.test; done
+```
+And then check the average total-download-time of CloudFront endpoint using the command below.
+
+```bash
+for i in `seq 1 10`; do echo $i; curl -s -o /dev/null --write-out "size_download: %{size_download} // time_total: %{time_total} // time_starttransfer: %{time_starttransfer}\n" http://[CloudFront endpoint]/test/download.test; done
+```
+## Dynamic Contents
+For dynamic content, although you can not utilize CloudFront's cache, you can improve performance through the AWS global network. CloudFront Edge locations are connected to the AWS Regions through the AWS network backbone - fully redundant, multiple 100GbE parallel fiber that circles the globe and links with tens of thousands of networks for improved origin fetches and dynamic content acceleration.
+
+### Performance Comparison between origin and CloudFrontHeader anchor link
+Check the average start transfer time of [apiOriginEndPoint] using the command below.
+
+```bash
+for i in `seq 1 10`; do echo $i; curl -s -o /dev/null --write-out "size_download: %{size_download} // time_total: %{time_total} // time_starttransfer: %{time_starttransfer}\n" https://cloudfront-workshop-originbucket-1m4gxe1jxb9kh.s3.amazonaws.com/api-echo/index.html/echo; done
+```
+
+* **time_total** is the total time in seconds, for the object to be downloaded.
+* **time_starttransfer** is the time in seconds, took from the start to receive first byte, this includes DNS lookup, TCP connection, TLS connection, and HTTP request sent.
+
+## Compression 
 
 ## Improve security with CloudFront
 
